@@ -83,7 +83,8 @@ def _origin_of(path: str) -> str | None:
 def _match_by_prefix(cwd: str, projects: dict[str, str]) -> str | None:
     best: tuple[int, str] | None = None
     for vault, path in projects.items():
-        path = os.path.realpath(path)
+        # expanduser: scope.json 里允许写 ~/...，同一注册表可跨机器（不同 home）复用
+        path = os.path.realpath(os.path.expanduser(path))
         if cwd == path or cwd.startswith(path + os.sep):
             if best is None or len(path) > best[0]:
                 best = (len(path), vault)
@@ -122,7 +123,7 @@ def resolve_scope(cwd: str | None = None) -> tuple[list[str] | None, str]:
     origin = _origin_of(cwd)
     if origin:
         for vault, path in projects.items():
-            if _origin_of(os.path.realpath(path)) == origin:
+            if _origin_of(os.path.realpath(os.path.expanduser(path))) == origin:
                 return sorted(set(globals_) | {vault}), f"origin:{vault}"
 
     return sorted(set(globals_)), "globals-only"
