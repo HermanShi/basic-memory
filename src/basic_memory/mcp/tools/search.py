@@ -473,7 +473,16 @@ async def _load_search_project_refs(context: Context | None = None) -> list[dict
     """Load accessible projects for search_all_projects without coupling the wrapper tool."""
     from basic_memory.mcp.tools.project_management import list_memory_projects
 
-    return _search_project_refs(await list_memory_projects(output_format="json", context=context))
+    refs = _search_project_refs(await list_memory_projects(output_format="json", context=context))
+
+    # scoped-search fork: BM_SCOPE_FILE 开启时，把「全部项目」收窄为
+    # 「全局记忆 + 从 cwd 推导的当前项目」；未开启时 allow=None，行为同上游。
+    from basic_memory.scope import scoped_projects
+
+    allow = scoped_projects()
+    if allow is not None:
+        refs = [r for r in refs if r.get("project") in allow]
+    return refs
 
 
 def _raw_results_from_search_payload(
@@ -712,10 +721,10 @@ async def search_notes(
     search_all_projects: Annotated[
         bool,
         Field(
-            default=False,
+            default=True,
             validation_alias=AliasChoices("search_all_projects", "all_projects"),
         ),
-    ] = False,
+    ] = True,
     # `offset` is intentionally NOT aliased to `page`: offset is item-indexed
     # (skip N items) while page is 1-indexed page-number. Direct aliasing would
     # silently return the wrong slice.
@@ -800,8 +809,10 @@ async def search_notes(
     Project Resolution:
     Server resolves projects in this order: Single Project Mode → project parameter → default project.
     If project unknown, use list_memory_projects() or recent_activity() first.
-    Set search_all_projects=True to search every accessible project; this is opt-in because it
-    performs one search per project.
+    By default this fork searches all projects in the current scope: when BM_SCOPE_FILE is
+    configured, that means global notes plus the project matching the server's working directory
+    (worktrees and derived clones fold back to the registered main project). Pass
+    search_all_projects=False or a specific project to search a single project instead.
 
     ## Search Syntax Examples
 
@@ -880,8 +891,9 @@ async def search_notes(
         project_id: Project external_id (UUID). Prefer this over `project` when known —
                 it routes to the exact project regardless of name collisions across cloud
                 workspaces. Takes precedence over `project`. Get from list_memory_projects().
-        search_all_projects: Optional opt-in to search every accessible project. Ignored when
-                `project` or `project_id` is supplied.
+        search_all_projects: Defaults to True in this fork: search every project in the
+                current scope (see BM_SCOPE_FILE). Pass False for single-project search.
+                Ignored when `project` or `project_id` is supplied.
         page: The page number of results to return (default 1)
         page_size: The number of results to return per page (default 10)
         search_type: Type of search to perform, one of:
