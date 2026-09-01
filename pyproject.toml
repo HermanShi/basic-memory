@@ -9,7 +9,7 @@ authors = [
     { name = "Basic Machines", email = "hello@basic-machines.co" }
 ]
 dependencies = [
-    "sqlalchemy>=2.0.0",
+    "sqlalchemy>=2.0.0,<2.1",
     "pyyaml>=6.0.1",
     "typer>=0.9.0",
     "aiosqlite>=0.20.0",
