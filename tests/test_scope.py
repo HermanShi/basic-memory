@@ -103,3 +103,60 @@ def test_manual_override(monkeypatch):
 
     monkeypatch.setenv("BM_SEARCH_PROJECTS", "mem-global, mem-project")
     assert scoped_projects() == ["mem-global", "mem-project"]
+
+
+def test_request_scope_cwd_stdio_has_no_http_request(monkeypatch):
+    """No live HTTP request (stdio MCP) → None → resolve_scope uses process getcwd.
+
+    Shared-server HTTP is opt-in via the header; stdio must not change.
+    """
+    from basic_memory.scope import request_scope_cwd
+
+    def _no_request(include=None):
+        return {}
+
+    monkeypatch.setattr(
+        "fastmcp.server.dependencies.get_http_headers",
+        _no_request,
+        raising=False,
+    )
+    assert request_scope_cwd() is None
+
+
+def test_request_scope_cwd_reads_absolute_header(monkeypatch):
+    from basic_memory.scope import SCOPE_CWD_HEADER, request_scope_cwd, scoped_projects
+
+    monkeypatch.setattr(
+        "fastmcp.server.dependencies.get_http_headers",
+        lambda include=None: {SCOPE_CWD_HEADER: AF},
+        raising=False,
+    )
+    assert request_scope_cwd() == AF
+    # Header cwd must beat process getcwd (the shared-server failure mode).
+    monkeypatch.chdir("/tmp")
+    monkeypatch.delenv("BM_SCOPE_CWD", raising=False)
+    assert scoped_projects(request_scope_cwd()) == ["mem-global", "mem-project"]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["relative/path", "tmp", "foo\n/tmp", ""],
+)
+def test_request_scope_cwd_ignores_non_absolute_or_empty(monkeypatch, raw):
+    from basic_memory.scope import SCOPE_CWD_HEADER, request_scope_cwd
+
+    monkeypatch.setattr(
+        "fastmcp.server.dependencies.get_http_headers",
+        lambda include=None: {SCOPE_CWD_HEADER: raw} if raw else {},
+        raising=False,
+    )
+    assert request_scope_cwd() is None
+
+
+def test_scoped_projects_explicit_cwd_beats_process_getcwd(monkeypatch):
+    from basic_memory.scope import scoped_projects
+
+    monkeypatch.chdir("/tmp")
+    monkeypatch.delenv("BM_SCOPE_CWD", raising=False)
+    assert scoped_projects("/tmp") == ["mem-global"]
+    assert scoped_projects(AF) == ["mem-global", "mem-project"]

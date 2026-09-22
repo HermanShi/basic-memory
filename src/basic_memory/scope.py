@@ -8,7 +8,10 @@ Resolution (highest priority first):
 1. env BM_SEARCH_PROJECTS (comma-separated) — explicit allowlist, used as-is,
    cwd is not consulted.
 2. Derive the current project from cwd, union with globals
-   (cwd source: BM_SCOPE_CWD env > os.getcwd(); the former exists for tests):
+   (cwd source: explicit argument > BM_SCOPE_CWD env > os.getcwd();
+    the env exists for tests. HTTP shared-server: pass the session cwd
+    via the X-Bm-Scope-Cwd header so each Claude session keeps its own
+    project scope — process getcwd() is the server's, not the client's):
    a. Path prefix match: cwd falls inside a registered source repo
       (subdirectories count).
    b. Worktree fold: cwd containing /.claude/worktrees/ is truncated back to
@@ -37,6 +40,9 @@ import subprocess
 from loguru import logger as log
 
 _WORKTREE_MARK = "/.claude/worktrees/"
+# HTTP shared-server: a thin stdio proxy sets this so search scope follows
+# the Claude session's project directory, not the MCP process cwd.
+SCOPE_CWD_HEADER = "x-bm-scope-cwd"
 
 
 def _load_registry() -> tuple[list[str], dict[str, str]] | None:
@@ -129,12 +135,45 @@ def resolve_scope(cwd: str | None = None) -> tuple[list[str] | None, str]:
     return sorted(set(globals_)), "globals-only"
 
 
-def scoped_projects() -> list[str] | None:
-    """Allowlist for _load_search_project_refs; None means scope disabled (upstream behavior)."""
+def request_scope_cwd() -> str | None:
+    """Session cwd for this MCP request, or None to fall back to process getcwd().
+
+    stdio (no HTTP request): FastMCP's get_http_headers() returns {} and this
+    returns None, so resolve_scope uses os.getcwd() as before.
+
+    streamable-http: a stdio proxy can send X-Bm-Scope-Cwd per request. Only an
+    absolute path is accepted; anything else is ignored (logged, not raised)
+    so a bad header cannot silently search the wrong tree via a relative join.
+    """
+    try:
+        from fastmcp.server.dependencies import get_http_headers
+    except ImportError:
+        return None
+    headers = get_http_headers(include={SCOPE_CWD_HEADER})
+    raw = (headers.get(SCOPE_CWD_HEADER) or "").strip()
+    if not raw:
+        return None
+    if any(ch in raw for ch in ("\n", "\r", "\x00")):
+        log.warning("bm scope: ignoring malformed {} header", SCOPE_CWD_HEADER)
+        return None
+    if not os.path.isabs(raw):
+        log.warning("bm scope: ignoring non-absolute {} header", SCOPE_CWD_HEADER)
+        return None
+    return raw
+
+
+def scoped_projects(cwd: str | None = None) -> list[str] | None:
+    """Allowlist for _load_search_project_refs; None means scope disabled (upstream behavior).
+
+    ``cwd`` is the directory to derive the current project from. Callers on the
+    MCP search path should pass :func:`request_scope_cwd` so a shared HTTP
+    server still scopes per session. ``None`` keeps the historical fallback
+    (BM_SCOPE_CWD, then process getcwd).
+    """
     raw = os.environ.get("BM_SEARCH_PROJECTS", "").strip()
     if raw:
         return sorted({p.strip() for p in raw.split(",") if p.strip()})
-    allow, why = resolve_scope()
+    allow, why = resolve_scope(cwd)
     if allow is not None:
         log.info("bm scope: {} ({})", allow, why)
     return allow

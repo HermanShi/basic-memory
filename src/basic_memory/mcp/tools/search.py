@@ -477,9 +477,9 @@ async def _load_search_project_refs(context: Context | None = None) -> list[dict
 
     # scoped-search fork: BM_SCOPE_FILE 开启时，把「全部项目」收窄为
     # 「全局记忆 + 从 cwd 推导的当前项目」；未开启时 allow=None，行为同上游。
-    from basic_memory.scope import scoped_projects
+    from basic_memory.scope import request_scope_cwd, scoped_projects
 
-    allow = scoped_projects()
+    allow = scoped_projects(request_scope_cwd())
     if allow is not None:
         refs = [r for r in refs if r.get("project") in allow]
     return refs
@@ -810,8 +810,9 @@ async def search_notes(
     Server resolves projects in this order: Single Project Mode → project parameter → default project.
     If project unknown, use list_memory_projects() or recent_activity() first.
     By default this fork searches all projects in the current scope: when BM_SCOPE_FILE is
-    configured, that means global notes plus the project matching the server's working directory
-    (worktrees and derived clones fold back to the registered main project). Pass
+    configured, that means global notes plus the project matching this request's
+    working directory (X-Bm-Scope-Cwd on HTTP, else the process cwd; worktrees
+    and derived clones fold back to the registered main project). Pass
     search_all_projects=False or a specific project to search a single project instead.
 
     ## Search Syntax Examples
