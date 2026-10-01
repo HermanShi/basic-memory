@@ -8,7 +8,9 @@ Resolution (highest priority first):
 1. env BM_SEARCH_PROJECTS (comma-separated) — explicit allowlist, used as-is,
    cwd is not consulted.
 2. Derive the current project from cwd, union with globals
-   (cwd source: BM_SCOPE_CWD env > os.getcwd(); the former exists for tests):
+   (cwd source: BM_SCOPE_CWD env > X-Bm-Scope-Cwd request header > os.getcwd();
+   the env var exists for tests, the header carries the client's cwd under the
+   shared streamable-http server where os.getcwd() is the server's own dir):
    a. Path prefix match: cwd falls inside a registered source repo
       (subdirectories count).
    b. Worktree fold: cwd containing /.claude/worktrees/ is truncated back to
@@ -37,6 +39,40 @@ import subprocess
 from loguru import logger as log
 
 _WORKTREE_MARK = "/.claude/worktrees/"
+SCOPE_CWD_HEADER = "x-bm-scope-cwd"
+
+
+def _http_scope_cwd() -> str | None:
+    """Per-request cwd from the X-Bm-Scope-Cwd header, for the shared HTTP server.
+
+    Under streamable-http one server process serves every session, so os.getcwd()
+    is the *server's* directory and scope would be identical for all clients —
+    the stdio proxy has always stamped this header, but nothing read it, so HTTP
+    mode silently fell back to globals-only (or whatever the server's cwd matched).
+
+    Returns None outside an HTTP request (stdio mode), where getcwd() is already
+    the session's own directory. get_http_headers() never raises and returns {}
+    when there is no active request, so this is inert under stdio.
+    """
+    try:
+        from fastmcp.server.dependencies import get_http_headers
+    except Exception:  # fastmcp absent or too old
+        return None
+    try:
+        # `include` is required: the header is not in fastmcp's default allowlist.
+        value = get_http_headers(include={SCOPE_CWD_HEADER}).get(SCOPE_CWD_HEADER)
+    except Exception as exc:  # never let scope resolution break a search
+        log.debug(f"scope: reading {SCOPE_CWD_HEADER} failed: {exc!r}")
+        return None
+    value = (value or "").strip()
+    if not value:
+        return None
+    # Only absolute POSIX paths are usable: a Windows client sends C:\Users\...,
+    # which cannot match a registry path and would silently mean globals-only.
+    if not value.startswith("/"):
+        log.debug(f"scope: ignoring non-POSIX {SCOPE_CWD_HEADER}={value!r}")
+        return None
+    return value
 
 
 def _load_registry() -> tuple[list[str], dict[str, str]] | None:
@@ -100,7 +136,7 @@ def resolve_scope(cwd: str | None = None) -> tuple[list[str] | None, str]:
     if not globals_ and not projects:
         return [], "registry-missing"
 
-    cwd = os.path.realpath(cwd or os.environ.get("BM_SCOPE_CWD") or os.getcwd())
+    cwd = os.path.realpath(cwd or os.environ.get("BM_SCOPE_CWD") or _http_scope_cwd() or os.getcwd())
 
     hit = _match_by_prefix(cwd, projects)
     if hit:
