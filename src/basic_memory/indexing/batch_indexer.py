@@ -128,7 +128,11 @@ class BatchIndexer:
         file_writer: IndexFileWriter,
         session_maker: async_sessionmaker[AsyncSession],
     ) -> None:
+        self.project_id = project_id
         self.app_config = app_config
+        # None until resolved. The read-only check is async because the config
+        # lists project names while the indexer only knows the numeric project id.
+        self._frontmatter_readonly: bool | None = None
         self.entity_service = entity_service
         self.entity_repository = entity_repository
         self.observation_repository = observation_repository
@@ -382,6 +386,30 @@ class BatchIndexer:
 
         return normalized, errors
 
+    async def _project_frontmatter_is_readonly(self) -> bool:
+        """True when this project's markdown must be indexed without rewriting it.
+
+        frontmatter_readonly_projects names projects whose files another tool owns,
+        so neither missing frontmatter nor a missing permalink may be written back.
+        The config lists project names; the indexer only has the numeric project id,
+        so the name is resolved from the project table once per indexer.
+        """
+        if self._frontmatter_readonly is None:
+            raw = self.app_config.frontmatter_readonly_projects
+            names = {item.strip() for item in raw.split(",") if item.strip()}
+            if not names:
+                self._frontmatter_readonly = False
+            else:
+                from basic_memory.models.project import Project
+                from sqlalchemy import select
+
+                async with db.scoped_session(self.session_maker) as session:
+                    project_name = await session.scalar(
+                        select(Project.name).where(Project.id == self.project_id)
+                    )
+                self._frontmatter_readonly = project_name in names
+        return self._frontmatter_readonly
+
     async def _normalize_markdown_file(
         self,
         prepared: _PreparedMarkdownFile,
@@ -394,7 +422,15 @@ class BatchIndexer:
         # Trigger: markdown file has no frontmatter and sync enforcement is enabled.
         # Why: downstream indexing relies on normalized metadata and stable permalinks.
         # Outcome: write derived metadata back through the storage-agnostic writer.
-        if not prepared.file_contains_frontmatter and self.app_config.ensure_frontmatter_on_sync:
+        # Projects listed in app_config.frontmatter_readonly_projects are indexed
+        # read-only: their files are owned by another tool (e.g. Claude Code's
+        # memory index, which requires MEMORY.md to stay frontmatter-free), so
+        # indexing must never rewrite them.
+        if (
+            not prepared.file_contains_frontmatter
+            and self.app_config.ensure_frontmatter_on_sync
+            and not await self._project_frontmatter_is_readonly()
+        ):
             frontmatter_updates = {
                 "title": prepared.markdown.frontmatter.title,
                 "type": prepared.markdown.frontmatter.type,
@@ -413,6 +449,7 @@ class BatchIndexer:
         elif (
             prepared.file_contains_frontmatter
             and not self.app_config.disable_permalinks
+            and not await self._project_frontmatter_is_readonly()
             and final_permalink != prepared.markdown.frontmatter.permalink
         ):
             prepared.markdown.frontmatter.metadata["permalink"] = final_permalink
@@ -438,9 +475,13 @@ class BatchIndexer:
         prepared: _PreparedMarkdownFile,
         reserved_permalinks: set[str],
     ) -> str | None:
-        should_resolve_permalink = (
-            not prepared.file_contains_frontmatter and self.app_config.ensure_frontmatter_on_sync
-        ) or (prepared.file_contains_frontmatter and not self.app_config.disable_permalinks)
+        should_resolve_permalink = not await self._project_frontmatter_is_readonly() and (
+            (
+                not prepared.file_contains_frontmatter
+                and self.app_config.ensure_frontmatter_on_sync
+            )
+            or (prepared.file_contains_frontmatter and not self.app_config.disable_permalinks)
+        )
         if not should_resolve_permalink:
             permalink = prepared.markdown.frontmatter.permalink
             if permalink:
@@ -807,6 +848,7 @@ class BatchIndexer:
         # Outcome: skip reconciliation writes that would silently inject frontmatter.
         if (
             self.app_config.disable_permalinks
+            or await self._project_frontmatter_is_readonly()
             or (
                 not prepared.file_contains_frontmatter
                 and not self.app_config.ensure_frontmatter_on_sync

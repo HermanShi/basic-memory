@@ -622,6 +622,20 @@ class BasicMemoryConfig(BaseSettings):
         description="Ensure markdown files have frontmatter during sync by adding derived title/type/permalink when missing. When combined with disable_permalinks=True, this setting takes precedence for missing-frontmatter files and still writes permalinks.",
     )
 
+    frontmatter_readonly_projects: str = Field(
+        default="",
+        description=(
+            "Comma-separated project names whose markdown files are indexed but "
+            "never rewritten. Indexing skips every frontmatter write-back for "
+            "these projects: no permalink is added to existing frontmatter and no "
+            "frontmatter is created for files that have none, regardless of "
+            "disable_permalinks and ensure_frontmatter_on_sync. Use for "
+            "directories owned by another tool, such as a Claude Code memory "
+            "index whose MEMORY.md must stay plain markdown. "
+            "Env: BASIC_MEMORY_FRONTMATTER_READONLY_PROJECTS."
+        ),
+    )
+
     permalinks_include_project: bool = Field(
         default=True,
         description="When True, generated permalinks are prefixed with the project slug (e.g., 'specs/search'). Existing permalinks remain unchanged unless explicitly updated.",
